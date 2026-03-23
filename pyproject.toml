@@ -1,0 +1,10 @@
+[project]
+name = "sg-mcp"
+version = "0.1.0"
+description = "sg-mcp description"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=3.1.1",
+    "requests>=2.32.5",
+]
