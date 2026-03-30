@@ -203,14 +203,14 @@ if __name__ == "__main__":
 
     # DEMO keyword_search
     # 查找展锐A16-SYSTEM的分支dev_Common_UI_A16下的关键词ShadowMaskSettings
-    # print(keyword_search("repo:SPRDROID16_SYS_MAIN_W25.22.4@dev_Common_UI_A16 content:ShadowMaskSettings"))
+    # print(keyword_search("repo:SPRD_B/SPRDROID16_SYS_MAIN_W25.22.4 rev:dev_Common_UI_A16 content:ShadowMaskSettings"))
 
     # DEMO read_file
     # 读取展锐A16-SYSTEM的分支dev_Common_UI_A16下的文件ShadowMaskSettings.kt
     # print(read_file("SPRD_B/SPRDROID16_SYS_MAIN_W25.22.4", "alps/packages/apps/Settings/src-ui/com/android/settings/shadowmask/ShadowMaskSettings.kt", "dev_Common_UI_A16", 0, 100))
 
     # DEMO go_to_definition
-    # 查找展锐A16-SYSTEM的分支dev_Common_UI_A16下的关键词的定义位置
+    # 查找私人库GetKnownMAUI的分支master下的关键词的定义位置
     # print(go_to_definition("github.com/CCMeta/GetKnownMAUI", "GetKnownMAUI/Views/MenuPage.xaml.cs", 26, 45, "HEAD"))
 
     # print(sourcegraph_keyword_search("repo:^github.com/CCMeta/cm31$ ccmeta"))
