@@ -1,0 +1,273 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "tools": [
+      {
+        "description": "This is a Sourcegraph search tool for open source code indexed on sourcegraph.com. Use this for searching public repositories and open source projects, not internal or private code. Finds references to a provided symbol in a repository.\nA symbol is any code identifier, such as a function name, variable name, or class name.\nIt handles overloading by leveraging compiler information to ensure references are to the exact symbol requested. It can even handle cross-repository references.\n\nReturns a list of usages of that symbol, specifically:\n- Where the symbol is referenced in the code\n- The file and line number of each reference\n- Surrounding context of each reference to help understand its usage\nIf the symbol is not found, returns \"Symbol not found\"\n\nThis tool is the opposite of the go_to_definition tool - it finds references (usages) to a symbol given its definition.\n\nYou should use this tool when you have a specific symbol in mind (function, method, variable, class, etc.), you know where it is defined (a file path) and want to see where it is referenced / used in the codebase.\n\nYou should choose to use this tool over keyword_search, nls_search or read_file when you have encountered the definition of a specific symbol (function, variable, class)\nand you want to see how that specific symbol is used throughout the codebase, understand code flow or performing impact analysis.\n\nExamples:\n\u003cexamples\u003e\n\t\u003cexample\u003e\n\t\t\u003cuser\u003eFind where the AbstractPaymentProcessorClass is used. It's defined in src/processors/AbstractPaymentProcessor.ts in the ecommerce/payment-service repository.\u003c/user\u003e\n\t\t\u003cresponse\u003e [calls the find references tool with repo=\"ecommerce/payment-service\", path=\"src/processors/AbstractPaymentProcessor.ts\", symbol=\"AbstractPaymentProcessor\"]\n\t\t {\n                \"repo\": \"ecommerce/payment-service\",\n                \"path\": \"src/processors/StripePaymentProcessor.ts\",\n                \"rev\": \"HEAD\",\n                \"chunks\": [\n\t\t\t\t\t{\n\t\t\t\t\t\t\"startLine\": 2,\n\t\t\t\t\t\t\"endLine\": 2,\n\t\t\t\t\t\t\"content\": \"2: import { AbstractPaymentProcessor } from './AbstractPaymentProcessor';\\n\"\n\t\t\t\t\t},\n                    {\n                        \"startLine\": 102,\n                        \"endLine\": 103,\n                        \"content\": \"102: class StripePaymentProcessor extends AbstractPaymentProcessor {\\n103: \\tprivate readonly Status status;\\n\"\n                    }\n                ]\n            }\n\t\t\u003c/response\u003e\n\t\u003c/example\u003e\n\u003c/examples\u003e",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "repo",
+            "path",
+            "symbol"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The path to the file within the repository containing the symbol reference, e.g. \"src/utils/date.ts\"."
+            },
+            "repo": {
+              "type": "string",
+              "description": "The name of the repository containing the file, e.g. \"github.com/tuckersoft/thronglets\"."
+            },
+            "revision": {
+              "type": "string",
+              "description": "The revision or branch to find references in. If not specified, defaults to the HEAD of the default branch."
+            },
+            "symbol": {
+              "type": "string",
+              "description": "The name of the symbol (function name, method name, class, variable, constant, etc) to find references for, e.g. \"handleSearch\"."
+            }
+          },
+          "additionalProperties": false
+        },
+        "name": "find_references",
+        "outputSchema": {
+          "type": "object",
+          "required": [
+            "fileBlocks"
+          ],
+          "properties": {
+            "fileBlocks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "type",
+                  "repo",
+                  "file",
+                  "chunks"
+                ],
+                "properties": {
+                  "chunks": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "startLine",
+                        "endLine",
+                        "content"
+                      ],
+                      "properties": {
+                        "content": {
+                          "type": "string"
+                        },
+                        "endLine": {
+                          "type": "integer"
+                        },
+                        "startLine": {
+                          "type": "integer"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "rev": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "description": "This is a Sourcegraph search tool for open source code indexed on sourcegraph.com. Use this for searching public repositories and open source projects, not internal or private code. Finds the definition of a specified symbol in a repository.\nThis tool can leverage compiler-level symbol information to provide accurate results and can handle cross-repository references.\n\nA symbol is any code identifier, such as a function or method name, variable name, or class name such as 'MyClass' or 'readFile'.\nThe symbol name should be the identifier as it appears in code (e.g., 'validateToken', 'MyClass', 'API_ENDPOINT').\nFor methods, use just the method name without the class prefix.\nFor nested symbols, use the simple name rather than fully qualified paths.\n\nThe tool will return the code snippet containing the definition of the symbol in the codebase, as well as its location - the file name and line number.\nIt will return up to 50 lines of the code snippet containing the definition of the symbol.\n\nThis tool is the opposite of the find_references tool - it finds the definition to a symbol given a reference/usage symbol.\n\nYou should use this tool when you have a specific symbol in mind (function, method, variable, class, etc.), you know where it is used (a file path) and want to see its definition in the codebase.\n\nYou should choose to use this tool over keyword_search, nls_search or read_file when you have encountered a specific symbol (function, method, variable, class, etc.)\nthat you want to understand better by seeing its definition.\n\nExamples:\n\u003cexamples\u003e\n    \u003cexample\u003e\n        \u003cuser\u003eI'm working in the auth-service/backend repo, in the file src/middleware/authMiddleware.js. This code calls await validateToken(session, token). Where is the function validateToken defined?\u003c/user\u003e\n        \u003cresponse\u003e [calls the go to definition tool with repo=\"auth-service/backend\", path=\"src/middleware/authMiddleware.js\", symbol=\"validateToken\"]\n            {\n                \"repo\": \"auth-service/backend\",\n                \"path\": \"src/middleware/validation.js\",\n                \"rev\": \"HEAD\",\n                \"chunks\": [\n                    {\n                        \"startLine\": 12,\n                        \"endLine\": 62,\n                        \"content\": \"12: function validateToken(session, token) { ... }\"\n                    }\n                ]\n            }\n        \u003c/response\u003e\n    \u003c/example\u003e\n\u003c/examples\u003e",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "repo",
+            "path",
+            "symbol"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The path to the file within the repository containing the symbol reference."
+            },
+            "repo": {
+              "type": "string",
+              "description": "The name of the repository containing the file. For example, \"github.com/burntsushi/ripgrep\"."
+            },
+            "revision": {
+              "type": "string",
+              "description": "The revision or branch to find the definition in. If not specified, defaults to the HEAD of the default branch."
+            },
+            "symbol": {
+              "type": "string",
+              "description": "The name of the symbol to find the definition for."
+            }
+          },
+          "additionalProperties": false
+        },
+        "name": "go_to_definition",
+        "outputSchema": {
+          "type": "object",
+          "required": [
+            "fileBlocks"
+          ],
+          "properties": {
+            "fileBlocks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "type",
+                  "repo",
+                  "file",
+                  "chunks"
+                ],
+                "properties": {
+                  "chunks": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "startLine",
+                        "endLine",
+                        "content"
+                      ],
+                      "properties": {
+                        "content": {
+                          "type": "string"
+                        },
+                        "endLine": {
+                          "type": "integer"
+                        },
+                        "startLine": {
+                          "type": "integer"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "rev": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "description": "This is a Sourcegraph search tool for open source code indexed on sourcegraph.com. Use this for searching public repositories and open source projects, not internal or private code. \nA keyword code search tool that helps you find relevant code snippets across repositories. Use this tool when you need to:\n- Find specific code with exact matching\n- Verify if certain code exists in the codebase\n- Find examples of code usage\n\nSearch capabilities:\n- Basic search: Enter keywords to find code containing those terms\n- Boolean search: Use AND/OR operators to combine terms. By default, all search terms are combined with AND, meaning that all search terms must match for a result to be included.\n- Filters:\n\t* repo: to search specific repositories (supports regex) Example: repo:github.com/google will select all repositories with the matching prefix (github.com/google-gemini/cookbook and github.com/google/neuroglancer both match). Use ^ to match the start of the string and $ to match the end of the string to avoid unwanted matches. You can chain multiple repo filters with OR while putting them in parentheses.\n\t* file: to search specific file patterns (supports regex) Example: file:README.md will only search files that have README.md in their name. file:.*.ts will search all files with a .ts extension.\n\t* rev: to search specific revisions (branches, tags, commits/sha). MUST always be used together with a repo: filter. Example: repo:^foo/bar$ rev:feat/xyz will only search the branch feat/xyz of the repo foo/bar. If not specified, defaults to the HEAD of the default branch.\n\nWhen NOT to use this tool:\n- For \"how does this work\" or understanding systems questions\n- For semantic or conceptual searches like 'authentication implementation'\n- For queries that are similar to natural language like \"API calls to middleware in admin panel\".\n- When you are not sure if the term exists in the codebase.\n- For queries with several search terms.\n- For exploratory searching of the codebase, when you are not sure what a certain term or name means.\n\nBest practices:\n- Use a small (1-3) number of search terms. Because we combine terms with AND by default, using too many terms may result in no results.\n- Use specific, descriptive search terms\n- Start with broader searches and narrow down using filters\n- Use repo: and file: filters to improve result relevance\n- The results are case insensitive, so you should not repeat the same search term with different capitalization.\n- Use regex (file:.*.py) instead of glob (file:*.py) for searching files with a .py extension\n- Don't use the rev: filter unless the user specifically asks for a particular branch, tag, or commit. The default behavior is to search the HEAD of the default branch.\nImportant: Use the literal OR between search terms if you are looking for code containing at least one of the terms. Do not use regex or with |.\n\nReturns the top 3 most relevant code chunks (truncated to 1024 characters) from each matching file (up to 15 files).\nIndividual lines longer than 256 characters are truncated.\n\nExamples:\n\u003cexamples\u003e\n\u003cexample\u003e\n\t\u003cuser\u003eFind all code in the secret-fellowship organization on Github using log4j\u003c/user\u003e\n\t\u003cresponse\u003ecalls the keyword search tool with query: \"repo:^github.com/secret-fellowship log4j\"\u003c/response\u003e\n\u003c/example\u003e\n\u003cexample\u003e\n\t\u003cuser\u003eFind all code in the github.com/kubernetes/autoscaler repo that uses the http.NewRequest function\u003c/user\u003e\n\t\u003cresponse\u003ecalls the keyword search tool with query: \"repo:^github.com/kubernetes/autoscaler$ http.NewRequest\"\u003c/response\u003e\n\u003c/example\u003e\n\u003cexample\u003e\n\t\u003cuser\u003eFind Go code in ollama where memory mapping is used on darwin or linux\u003c/user\u003e\n\t\u003cresponse\u003ecalls the keyword search tool with query: \"repo:ollama file:.*.go mmap AND (darwin OR linux)\"\u003c/response\u003e\n\u003c/example\u003e\n\u003cexample\u003e\n\t\u003cuser\u003eFind FAQs in all readme files across all repositories\u003c/user\u003e\n\t\u003cresponse\u003ecalls the keyword search tool with query: \"file:README.md FAQ\"\u003c/response\u003e\n\u003c/example\u003e\n\u003cexample\u003e\n\t\u003cuser\u003eFind code in bar or foo repos that uses lodash\u003c/user\u003e\n\t\u003cresponse\u003ecalls the keyword search tool with query: \"(repo:foo OR repo:bar) lodash\"\u003c/response\u003e\n\u003c/example\u003e\n\u003cexample\u003e\n\t\u003cuser\u003eFind code containing either foo or bar in the dev/docs directory\u003c/user\u003e\n\t\u003cresponse\u003ecalls the keyword search tool with query: \"file:^dev/docs foo OR bar\"\u003c/response\u003e\n\u003c/example\u003e\n\u003cexample\u003e\n\t\u003cuser\u003eFind code containing foo in dev/docs directory of the repo bar/bas on branch quz/user\u003e\n\t\u003cresponse\u003ecalls the keyword search tool with query: \"repo:^bar/bas$ rev:quz file:^dev/docs foo\"\u003c/response\u003e\n\u003c/examples\u003e\n",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "query"
+          ],
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The search query. Can include keywords, regex patterns, and filters."
+            }
+          },
+          "additionalProperties": false
+        },
+        "name": "keyword_search",
+        "outputSchema": {
+          "type": "object",
+          "required": [
+            "blocks"
+          ],
+          "properties": {
+            "blocks": {
+              "type": "array",
+              "items": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "description": "This is a Sourcegraph search tool for open source code indexed on sourcegraph.com. Use this for searching public repositories and open source projects, not internal or private code. \nReads the content of a file in the workspace.\nReturns the file content as a string.\nEach line is prefixed with its actual line number from the file. The line numbers are 1-indexed. If a file contains \"abc\\\\ndef\", you will receive \"1: abc\\\\n2: def\".\nYou can optionally specify a line range to read only a portion of the file.\nIf you attempt to read a file that is too large (limit is 128 KB), you will receive an error. In that case, retry with a smaller line range.\n\nIMPORTANT: Use this tool ONLY when you have already located the specific file.\nBefore using this tool:\n- ALWAYS verify both the repository and file exist by using list_repos, list_files, keyword_search, or nls_search first\n- NEVER try to read a file without first confirming it exists at the exact path\n- NEVER guess file paths or assume common structures like \"lib/shared/src\" exist - always verify\n\nExamples:\n\u003cexamples\u003e\n\u003cexample\u003e\n\t\u003cuser\u003eSummarize the readme in the pytorch/torcheval repository\u003c/user\u003e\n\t\u003cresponse\u003e[First checks that the repository exists by calling list_repos]\n\t[Then verifies README.md exists using list_files with repo: \"pytorch/torcheval\"]\n\tCalls the read file tool with repo: \"pytorch/torcheval\", path: \"README.md\"\u003c/response\u003e\n\u003c/example\u003e\n\u003cexample\u003e\n\t\u003cuser\u003eRead the first 100 lines of the code in cli/build.rs in the tokio-rs/tokio repository\u003c/user\u003e\n\t\u003cresponse\u003e[First confirms the file exists using list_files or keyword_search]\n\tCalls the read file tool with repo: \"tokio-rs/tokio\", path: \"cli/build.rs\", startLine: 1, endLine: 100\u003c/response\u003e\n\u003c/example\u003e\n\u003cexample\u003e\n\t\u003cuser\u003eRead the first 100 lines of the code in cli/build.rs in the tokio-rs/tokio repository at commit 1234567890\u003c/user\u003e\n\t\u003cresponse\u003e[First confirms the file exists using list_files or keyword_search]\n\tCalls the read file tool with repo: \"tokio-rs/tokio\", path: \"cli/build.rs\", startLine: 1, endLine: 100, revision: \"1234567890\"\u003c/response\u003e\n\u003c/example\u003e\n\u003cexample\u003e\n\t\u003cuser\u003eRead the first 100 lines of the code in cli/build.rs in the tokio-rs/tokio repository at branch feat/xzy\u003c/user\u003e\n\t\u003cresponse\u003e[First confirms the file exists using list_files or keyword_search]\n\tCalls the read file tool with repo: \"tokio-rs/tokio\", path: \"cli/build.rs\", startLine: 1, endLine: 100, revision: \"feat/xzy\"\u003c/response\u003e\n\u003c/example\u003e\n\u003c/examples\u003e",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "repo",
+            "path"
+          ],
+          "properties": {
+            "endLine": {
+              "type": "integer",
+              "description": "The 1-based line number to end reading at. If not specified, reads to the end of the file."
+            },
+            "path": {
+              "type": "string",
+              "description": "The path to the file within the repository."
+            },
+            "repo": {
+              "type": "string",
+              "description": "The name of the repository containing the file. For example, \"github.com/sveltejs/svelte\"."
+            },
+            "revision": {
+              "type": "string",
+              "description": "The revision to read the file from. If not specified, reads from the default branch. This can be a commit hash or a branch name"
+            },
+            "startLine": {
+              "type": "integer",
+              "description": "The 1-based line number to start reading from. If not specified, starts from the beginning of the file."
+            }
+          },
+          "additionalProperties": false
+        },
+        "name": "read_file",
+        "outputSchema": {
+          "type": "object",
+          "required": [
+            "content"
+          ],
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+}

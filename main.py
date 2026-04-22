@@ -28,7 +28,7 @@ def graphql_query(query, variables=None):
 
 
 @mcp.tool()
-def keyword_search(query: str, limit: int = 10) -> str:
+def keyword_search(query: str, repo_name: str, branch: str = "dev_CipherLAB_F1", limit: int = 10) -> str:
     """
     Search code in the Sourcegraph instance.
     Use this to find file paths, function definitions, or specific code patterns.
@@ -36,7 +36,10 @@ def keyword_search(query: str, limit: int = 10) -> str:
     Args:
         query: The search query (e.g., 'repo:B0_MP1/alps-release-b0.mp1.rc-aiot rev:dev_CipherLAB_F1 content:MTK_CAMERA_APP_VERSION_SEVEN')
         limit: Max number of results to return (default 10, max 20)
+    Returns:
+        A string of JSON formatted
     """
+    query = f"repo:{repo_name} rev:{branch} content:{query} count:{limit}"
     gql = """
     query Search($query: String!) {
       search(query: $query) {
@@ -59,16 +62,14 @@ def keyword_search(query: str, limit: int = 10) -> str:
       }
     }
     """
-    # 自动加上 limit，防止 LLM 被大量数据淹没
-    full_query = f"{query} count:{limit}"
-    data = graphql_query(gql, {"query": full_query})
+    data = graphql_query(gql, {"query": query})
     
-    print(data)
+    # print(data)
     if "error" in data:
         return f"Search Error: {data['error']}"
         
     results = data.get("data", {}).get("search", {}).get("results", {}).get("results", [])
-    
+    return results
     if not results:
         return "No code found matching your query."
 
@@ -96,6 +97,8 @@ def read_file(repo_name: str, file_path: str, branch: str = "dev_CipherLAB_F1", 
         branch: Branch name or commit hash (default: "dev_CipherLAB_F1")
         start_line: Optional start line number (0-indexed)
         end_line: Optional end line number (0-indexed). If -1, reads to end.
+    Returns:
+        A string of JSON formatted
     """
 
     gql = """
@@ -115,7 +118,7 @@ def read_file(repo_name: str, file_path: str, branch: str = "dev_CipherLAB_F1", 
         return f"Read Error: {data['error']}"
     # print (data)
     content = data.get("data", {}).get("repository", {}).get("commit", {}).get("file", {}).get("content")
-    
+    return
     if content is None:
         return "File not found or empty."
 
@@ -147,7 +150,9 @@ def go_to_definition(repo_name: str, file_path: str, line: int, character: int, 
         file_path: The file path where the symbol usage is located (e.g., 'alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java')
         line: The line number (0-indexed)
         character: The character offset (0-indexed) of the symbol
-        branch: Branch name or commit hash (default: "HEAD")
+        branch: Branch name or commit hash (default: "dev_CipherLAB_F1")
+    Returns:
+        A string of JSON formatted
     """
     gql = """
     query GetDefinition($repo: String!, $rev: String!, $path: String!, $line: Int!, $character: Int!) {
@@ -159,7 +164,6 @@ def go_to_definition(repo_name: str, file_path: str, line: int, character: int, 
                 nodes {
                   resource {
                     path
-                    repository { name }
                   }
                   range {
                     start { line, character }
@@ -183,7 +187,7 @@ def go_to_definition(repo_name: str, file_path: str, line: int, character: int, 
         # defs = data['data']['repository']['commit']['blob']['lsif']['definitions']['nodes']
         if not defs:
             return "No definition found (SCIP index might be missing)."
-            
+        return defs
         output = []
         for d in defs:
             d_repo = d['resource']['repository']['name']
@@ -196,28 +200,87 @@ def go_to_definition(repo_name: str, file_path: str, line: int, character: int, 
         return f"Error parsing graph data: {str(e)}"
 
 
+@mcp.tool()
+def get_references(repo_name: str, file_path: str, line: int, character: int, branch: str = "dev_CipherLAB_F1", limit: int = 20) -> str:
+    """
+    Find References: Find all places where a symbol is used/called.
+
+    Args:
+        repo_name: The repository name (e.g., 'B0_MP1/alps-release-b0.mp1.rc-aiot')
+        file_path: The file path where the symbol definition is located (e.g., 'alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java')
+        line: The line number (0-indexed)
+        character: The character offset (0-indexed) of the symbol
+        branch: Branch name or commit hash (default: "dev_CipherLAB_F1")
+        limit: The maximum number of references to return (default: 20)
+    Returns:
+        A string of JSON formatted
+    """
+    gql = """
+    query References($repo: String!, $rev: String!, $path: String!, $line: Int!, $character: Int!, $limit: Int!) {
+      repository(name: $repo) {
+        commit(rev: $rev) {
+          blob(path: $path) {
+            lsif {
+              references(line: $line, character: $character, first: $limit) {
+                nodes {
+                  resource {
+                    path
+                  }
+                  range {
+                    start { line }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    data = graphql_query(gql, {
+        "repo": repo_name, "path": file_path, 
+        "line": line, "character": character, "rev": branch, "limit": limit
+    })
+
+    print(data)
+    # 解析复杂的 GraphQL 返回
+    
+    try:
+        refs = data['data']['repository']['commit']['blob']['lsif']['references']['nodes']
+        if not refs:
+            return "No references found."
+            
+        output = [f"Found {len(refs)} references:"]
+        for r in refs:
+            # r_repo = r['resource']['repository']['name']
+            r_path = r['resource']['path']
+            r_line = r['range']['start']['line']
+            output.append(f"- {r_path} (Line {r_line})")
+            
+        return "\n".join(output)
+    except Exception as e:
+        return f"Error parsing graph data: {str(e)}"
+
+
 if __name__ == "__main__":
     print("Starting MCP server...")
     # mcp.run()
     # MCP Inspector调试页面URL写入http://127.0.0.1:8000/mcp即可
-    mcp.run(transport="http", host="0.0.0.0", port=8010)
+    # mcp.run(transport="http", host="0.0.0.0", port=8010)
+    time_start = time.time()
 
     # DEMO keyword_search
-    # 查找展锐A16-SYSTEM的分支dev_CipherLAB_F1下的关键词ShadowMaskSettings
-    # print(keyword_search("repo:B0_MP1/alps-release-b0.mp1.rc-aiot rev:dev_CipherLAB_F1 content:ShadowMaskSettings"))
+    # 查找MTK A16-SYSTEM的分支dev_CipherLAB_F1下的关键词MTK_CAMERA_APP_VERSION_SEVEN
+    # print(keyword_search("MTK_CAMERA_APP_VERSION_SEVEN", "B0_MP1/alps-release-b0.mp1.rc-aiot", "dev_CipherLAB_F1"))
 
     # DEMO read_file
     # 读取展锐A16-SYSTEM的分支dev_CipherLAB_F1下的文件ShadowMaskSettings.kt
-    # print(read_file("B0_MP1/alps-release-b0.mp1.rc-aiot", "alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java", "dev_CipherLAB_F1", 0, 100))
+    print(read_file("B0_MP1/alps-release-b0.mp1.rc-aiot", "alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java", "dev_CipherLAB_F1", 0, 100))
 
     # DEMO go_to_definition
     # 查找私人库GetKnownMAUI的分支master下的关键词的定义位置
-    # print(go_to_definition("github.com/CCMeta/GetKnownMAUI", "GetKnownMAUI/Views/MenuPage.xaml.cs", 26, 45, "HEAD"))
+    # print(go_to_definition("B0_MP1/alps-release-b0.mp1.rc-aiot", "alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java", 100, 8, "dev_CipherLAB_F1"))
 
-    # print(sourcegraph_keyword_search("repo:^github.com/CCMeta/cm31$ ccmeta"))
-    time_start = time.time()
-    # print(sourcegraph_keyword_search("repo:^github\.com/CCMeta/flv\.js$ NativePlayer"))
+    # print(get_references("B0_MP1/alps-release-b0.mp1.rc-aiot", "alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java", 79, 21111, "dev_CipherLAB_F1", 20))
+
     print(f"[CCMETA] Search cost {time.time() - time_start:.2f} seconds.")
-    # print(keyword_search("function", 10))
-    # print(read_file("github.com/CCMeta/ShadowMask", "app/src/main/java/com/example/shadowmask/PrivacyOverlayService.kt", "master", 0, 100))
-    #print (go_to_definition("github.com/CCMeta/ShadowMask", "app/src/main/java/com/example/shadowmask/PrivacyOverlayService.kt", 90, 20, "master"))
