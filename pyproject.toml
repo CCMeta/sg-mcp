@@ -5,6 +5,6 @@ description = "sg-mcp description"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastmcp>=3.1.1",
-    "requests>=2.32.5",
+    "fastmcp>=3.2.4",
+    "requests>=2.33.1",
 ]

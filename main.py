@@ -43,7 +43,9 @@ class CodeChunk(BaseModel):
     Represents a snippet of code from a file.
     """
     startLine: int = Field(description="0-based line number where the chunk starts")
+    startCharacter: int = Field(description="0-based character offset where the chunk starts")
     endLine: int = Field(description="0-based line number where the chunk ends")
+    endCharacter: int = Field(description="0-based character offset where the chunk ends")
     content: str = Field(description="Code content with line number prefixes")
 
 
@@ -128,7 +130,7 @@ async def find_references(input: FindReferencesInput) -> FindReferencesOutput:
     if "error" in data:
         return FindReferencesOutput(fileBlocks=[])
 
-    file_blocks = []
+    file_blocks_dict = {}
 
     try:
         refs = data["data"]["repository"]["commit"]["blob"]["lsif"]["references"]["nodes"]
@@ -139,30 +141,30 @@ async def find_references(input: FindReferencesInput) -> FindReferencesOutput:
 
         for ref in refs:
             file_path = ref["resource"]["path"]
-            start_line = ref["range"]["start"]["line"]  
+            start_line = ref["range"]["start"]["line"]
             end_line = ref["range"]["end"]["line"]
-
-            existing_block = next((b for b in file_blocks if b.file == file_path), None)
 
             chunk = CodeChunk(
                 startLine=start_line,
+                startCharacter=ref["range"]["start"]["character"],
+                endCharacter=ref["range"]["end"]["character"],
                 endLine=end_line,
-                content=f"Reference: L{start_line}:{ref['range']['start']['character']} - L{end_line}:{ref['range']['end']['character']}"
+                content=""
             )
 
-            if existing_block:
-                existing_block.chunks.append(chunk)
+            if file_path in file_blocks_dict:
+                file_blocks_dict[file_path].chunks.append(chunk)
             else:
                 file_block = FileBlock(
                     file=file_path,
                     chunks=[chunk]
                 )
-                file_blocks.append(file_block)
+                file_blocks_dict[file_path] = file_block
 
     except Exception as e:
         print(f"Error parsing references: {str(e)}")
 
-    return FindReferencesOutput(fileBlocks=file_blocks)
+    return FindReferencesOutput(fileBlocks=list(file_blocks_dict.values()))
 
 
 # ----------------------------------------
@@ -254,7 +256,9 @@ async def go_to_definition(input: GoToDefinitionInput) -> GoToDefinitionOutput:
             chunk = CodeChunk(
                 startLine=start_line,
                 endLine=end_line,
-                content=f"Definition: L{start_line}:{d['range']['start']['character']} - L{end_line}:{d['range']['end']['character']}" 
+                startCharacter=d["range"]["start"]["character"],
+                endCharacter=d["range"]["end"]["character"],
+                content="" 
             )
 
             file_block = FileBlock(
@@ -280,7 +284,7 @@ class KeywordSearchInput(BaseModel):
 
 
 class KeywordSearchOutput(BaseModel):
-    blocks: List[Any] = Field(description="List of matching code blocks")
+    blocks: List[FileBlock] = Field(description="List of matching code blocks")
 
 @mcp.tool()
 async def keyword_search(input: KeywordSearchInput) -> KeywordSearchOutput:
@@ -309,6 +313,7 @@ async def keyword_search(input: KeywordSearchInput) -> KeywordSearchOutput:
               lineMatches {
                 preview
                 lineNumber
+                offsetAndLengths
               }
             }
           }
@@ -344,6 +349,8 @@ async def keyword_search(input: KeywordSearchInput) -> KeywordSearchOutput:
                     chunk = CodeChunk(
                         startLine=line_match["lineNumber"],
                         endLine=line_match["lineNumber"],
+                        startCharacter=line_match["offsetAndLengths"][0][0],
+                        endCharacter=line_match["offsetAndLengths"][0][0] + line_match["offsetAndLengths"][0][1],
                         content=line_match["preview"].rstrip()
                     )
                     chunks.append(chunk)
