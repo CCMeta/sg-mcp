@@ -1,45 +1,299 @@
-import time
-
+#!/usr/bin/env python3
+from typing import Annotated, List, Optional, Dict, Any
+from pydantic import BaseModel, Field
 import requests
 import json
-
-from typing import Dict, Any, List
+import os
 from collections import defaultdict
 from fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
 
-# 配置信息
-SOURCEGRAPH_URL = "http://192.168.3.95" # 替换你的地址
-ACCESS_TOKEN = "sgp_local_14007cabda4fd8ae47faf83d55a1d92f480c8681" # 替换你的Token
 
-# 初始化 MCP Server
-mcp = FastMCP("my-fastmcp-server")
+mcp = FastMCP("sr-sg-mcp-server2")
+
+SOURCEGRAPH_URL = "http://192.168.3.95"
+ACCESS_TOKEN = "sgp_local_14007cabda4fd8ae47faf83d55a1d92f480c8681"
+HEADERS = {
+    "Content-Type": "application/json",
+    "Authorization": f"token {ACCESS_TOKEN}"
+}
 
 def graphql_query(query, variables=None):
     """通用的 GraphQL 请求发送函数"""
-    headers = {"Authorization": f"token {ACCESS_TOKEN}"}
     endpoint = f"{SOURCEGRAPH_URL}/.api/graphql"
-    
+
     try:
-        resp = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers, timeout=10)
+        resp = requests.post(
+            endpoint,
+            json={"query": query, "variables": variables},
+            headers=HEADERS,
+            timeout=10
+        )
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
         return {"error": str(e)}
 
 
+# ----------------------------------------
+# Common Data Structures
+# ----------------------------------------
+class CodeChunk(BaseModel):
+    """
+    Represents a snippet of code from a file.
+    """
+    startLine: int = Field(description="0-based line number where the chunk starts")
+    endLine: int = Field(description="0-based line number where the chunk ends")
+    content: str = Field(description="Code content with line number prefixes")
+
+
+class FileBlock(BaseModel):
+    """
+    Represents a file with matching code chunks.
+    """
+    file: str = Field(description="File path within the repository")
+    chunks: List[CodeChunk] = Field(description="List of matching code chunks")
+
+
+# ----------------------------------------
+# Tool 1: find_references
+# ----------------------------------------
+class FindReferencesInput(BaseModel):
+    repo_name: str = Field(description="Repository name (e.g., B0_MP1/alps-release-b0.mp1.rc-aiot)")
+    file_path: str = Field(description="File path containing the symbol")
+    line: int = Field(description="0-indexed line number of the symbol")
+    character: int = Field(description="0-indexed character offset of the symbol")
+    branch: str = Field("dev_CipherLAB_F1", description="Branch name or commit hash")
+    limit: int = Field(20, description="Maximum number of references to return")
+
+
+class FindReferencesOutput(BaseModel):
+    fileBlocks: List[FileBlock] = Field(description="List of files with symbol references")
+
 @mcp.tool()
-def keyword_search(query: str, repo_name: str, branch: str = "dev_CipherLAB_F1", limit: int = 10) -> str:
+async def find_references(input: FindReferencesInput) -> FindReferencesOutput:
     """
-    Search code in the Sourcegraph instance.
-    Use this to find file paths, function definitions, or specific code patterns.
-    
-    Args:
-        query: The search query (e.g., 'repo:B0_MP1/alps-release-b0.mp1.rc-aiot rev:dev_CipherLAB_F1 content:MTK_CAMERA_APP_VERSION_SEVEN')
-        limit: Max number of results to return (default 10, max 20)
-    Returns:
-        A string of JSON formatted
+    Finds references to a provided symbol in a repository.
+
+    Use this tool when you have a specific symbol in mind (function, method, variable, class, etc.),
+    you know where it is defined (a file path) and want to see where it is referenced / used in the codebase.
+
+    This tool is the opposite of the go_to_definition tool - it finds references (usages) to a symbol given its definition.
     """
-    query = f"repo:{repo_name} rev:{branch} content:{query} count:{limit}"
+
+    gql = """
+    query References($repo: String!, $rev: String!, $path: String!, $line: Int!, $character: Int!, $limit: Int!) {
+      repository(name: $repo) {
+        commit(rev: $rev) {
+          blob(path: $path) {
+            lsif {
+              references(line: $line, character: $character, first: $limit) {
+                nodes {
+                  resource {
+                    path
+                    repository {
+                      name
+                    }
+                  }
+                  range {
+                    start {
+                      line
+                      character
+                    }
+                    end {
+                      line
+                      character
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    variables = {
+        "repo": input.repo_name,
+        "rev": input.branch,
+        "path": input.file_path,
+        "line": input.line,
+        "character": input.character,
+        "limit": input.limit
+    }
+
+    data = graphql_query(gql, variables)
+
+    if "error" in data:
+        return FindReferencesOutput(fileBlocks=[])
+
+    file_blocks = []
+
+    try:
+        refs = data["data"]["repository"]["commit"]["blob"]["lsif"]["references"]["nodes"]
+    except (KeyError, TypeError):
+        refs = []
+
+    try:
+
+        for ref in refs:
+            file_path = ref["resource"]["path"]
+            start_line = ref["range"]["start"]["line"]  
+            end_line = ref["range"]["end"]["line"]
+
+            existing_block = next((b for b in file_blocks if b.file == file_path), None)
+
+            chunk = CodeChunk(
+                startLine=start_line,
+                endLine=end_line,
+                content=f"Reference: L{start_line}:{ref['range']['start']['character']} - L{end_line}:{ref['range']['end']['character']}"
+            )
+
+            if existing_block:
+                existing_block.chunks.append(chunk)
+            else:
+                file_block = FileBlock(
+                    file=file_path,
+                    chunks=[chunk]
+                )
+                file_blocks.append(file_block)
+
+    except Exception as e:
+        print(f"Error parsing references: {str(e)}")
+
+    return FindReferencesOutput(fileBlocks=file_blocks)
+
+
+# ----------------------------------------
+# Tool 2: go_to_definition
+# ----------------------------------------
+class GoToDefinitionInput(BaseModel):
+    repo_name: str = Field(description="Repository name (e.g., B0_MP1/alps-release-b0.mp1.rc-aiot)")
+    file_path: str = Field(description="File path where the symbol is used")
+    line: int = Field(description="0-indexed line number of the symbol")
+    character: int = Field(description="0-indexed character offset of the symbol")
+    branch: str = Field("dev_CipherLAB_F1", description="Branch name or commit hash")
+
+
+class GoToDefinitionOutput(BaseModel):
+    fileBlocks: List[FileBlock] = Field(description="List containing the definition file")
+
+@mcp.tool()
+async def go_to_definition(input: GoToDefinitionInput) -> GoToDefinitionOutput:
+    """
+    Finds the definition of a specified symbol in a repository.
+
+    Use this tool when you have a specific symbol in mind (function, method, variable, class, etc.), you know where it is used (a file path) and want to see its definition in the codebase.
+
+    This tool is the opposite of the find_references tool - it finds the definition to a symbol given a reference/usage symbol.
+
+    You should choose to use this tool over keyword_search or read_file when you have encountered a specific symbol (function, method, variable, class, etc.) that you want to understand better by seeing its definition.
+    """
+
+    gql = """
+    query GetDefinition($repo: String!, $rev: String!, $path: String!, $line: Int!, $character: Int!) {
+      repository(name: $repo) {
+        commit(rev: $rev) {
+          blob(path: $path) {
+            lsif {
+              definitions(line: $line, character: $character) {
+                nodes {
+                  resource {
+                    path
+                    repository {
+                      name
+                    }
+                  }
+                  range {
+                    start {
+                      line
+                      character
+                    }
+                    end {
+                      line
+                      character
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    variables = {
+        "repo": input.repo_name,
+        "rev": input.branch,
+        "path": input.file_path,
+        "line": input.line,
+        "character": input.character
+    }
+
+    # 调用Sourcegraph GraphQL API
+    data = graphql_query(gql, variables)
+
+    if "error" in data:
+        return GoToDefinitionOutput(fileBlocks=[])
+
+    file_blocks = []
+
+    try:
+        defs = data["data"]["repository"]["commit"]["blob"]["lsif"]["definitions"]["nodes"]
+    except (KeyError, TypeError):
+        defs = []
+
+    try:
+        for d in defs:
+            file_path = d["resource"]["path"]
+            start_line = d["range"]["start"]["line"]  
+            end_line = d["range"]["end"]["line"]
+
+            chunk = CodeChunk(
+                startLine=start_line,
+                endLine=end_line,
+                content=f"Definition: L{start_line}:{d['range']['start']['character']} - L{end_line}:{d['range']['end']['character']}" 
+            )
+
+            file_block = FileBlock(
+                file=file_path,
+                chunks=[chunk]
+            )
+            file_blocks.append(file_block)
+
+    except Exception as e:
+        print(f"Error parsing definition: {str(e)}")
+
+    return GoToDefinitionOutput(fileBlocks=file_blocks)
+
+
+# ----------------------------------------
+# Tool 3: keyword_search
+# ----------------------------------------
+class KeywordSearchInput(BaseModel):
+    query: str = Field(description="Search query string")
+    repo_name: str = Field(description="Repository name to search in")
+    branch: str = Field("dev_CipherLAB_F1", description="Branch name or commit hash")
+    limit: int = Field(10, description="Maximum number of results to return")
+
+
+class KeywordSearchOutput(BaseModel):
+    blocks: List[Any] = Field(description="List of matching code blocks")
+
+@mcp.tool()
+async def keyword_search(input: KeywordSearchInput) -> KeywordSearchOutput:
+    """
+    Search for any keyword, string literal, or code pattern across all files in a repository using exact string matching.
+    Use this when you have a text pattern to search for but don't have an exact symbol location.
+    Do NOT use this if you already have a symbol location — use go_to_definition or find_references instead.
+    Do NOT use this if you know the file path — use read_file instead.
+    """
+    # 构造查询字符串 - 参考main.py中的实现
+    search_query = f"repo:{input.repo_name} rev:{input.branch} content:{input.query} count:{input.limit}"
+
+    # GraphQL查询语句
     gql = """
     query Search($query: String!) {
       search(query: $query) {
@@ -62,45 +316,74 @@ def keyword_search(query: str, repo_name: str, branch: str = "dev_CipherLAB_F1",
       }
     }
     """
-    data = graphql_query(gql, {"query": query})
-    
-    # print(data)
+
+    variables = {
+        "query": search_query
+    }
+
+    # 调用Sourcegraph GraphQL API
+    data = graphql_query(gql, variables)
+
     if "error" in data:
-        return f"Search Error: {data['error']}"
-        
-    results = data.get("data", {}).get("search", {}).get("results", {}).get("results", [])
-    return results
-    if not results:
-        return "No code found matching your query."
+        return KeywordSearchOutput(blocks=[])
 
-    # 格式化输出给 LLM 看
-    output = []
-    for res in results:
-        repo = res['file']['repository']['name']
-        path = res['file']['path']
-        output.append(f"--- File: {repo}/{path} ---")
-        for match in res.get('lineMatches', []):
-            output.append(f"Line {match['lineNumber']}: {match['preview'].strip()}")
-        output.append("")
-    
-    return "\n".join(output)
+    blocks = []
 
+    try:
+        results = data["data"]["search"]["results"]["results"]
+    except (KeyError, TypeError):
+        results = []
+
+    try:
+        for res in results:
+            if "file" in res and "lineMatches" in res:
+                file_path = res["file"]["path"]
+
+                chunks = []
+                for line_match in res.get("lineMatches", []):
+                    chunk = CodeChunk(
+                        startLine=line_match["lineNumber"],
+                        endLine=line_match["lineNumber"],
+                        content=line_match["preview"].rstrip()
+                    )
+                    chunks.append(chunk)
+
+                if chunks:
+                    file_block = FileBlock(
+                        file=file_path,
+                        chunks=chunks
+                    )
+                    blocks.append(file_block.model_dump())
+
+    except Exception as e:
+        print(f"Error parsing search results: {str(e)}")
+
+    return KeywordSearchOutput(blocks=blocks)
+
+
+# ----------------------------------------
+# Tool 4: read_file
+# ----------------------------------------
+class ReadFileInput(BaseModel):
+    repo_name: str = Field(description="Repository name (e.g., B0_MP1/alps-release-b0.mp1.rc-aiot)")
+    file_path: str = Field(description="Full path to the file within the repository")
+    branch: str = Field("dev_CipherLAB_F1", description="Branch name or commit hash")
+    start_line: int = Field(0, description="0-indexed start line number")
+    end_line: int = Field(-1, description="0-indexed end line number(inclusive this line), -1 means read to end")
+
+
+class ReadFileOutput(BaseModel):
+    content: str = Field(description="File content with each line prefixed by its 0-indexed line number. e.g. '0: first line text\n1: second line text\n2: third line text'")
 
 @mcp.tool()
-def read_file(repo_name: str, file_path: str, branch: str = "dev_CipherLAB_F1", start_line: int = 0, end_line: int = -1) -> str:
+async def read_file(input: ReadFileInput) -> ReadFileOutput:
     """
-    Read the raw content of a specific file from a repository.
-    
-    Args:
-        repo_name: The name of the repository (e.g., 'B0_MP1/alps-release-b0.mp1.rc-aiot')
-        file_path: The full path to the file (e.g., 'alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java')
-        branch: Branch name or commit hash (default: "dev_CipherLAB_F1")
-        start_line: Optional start line number (0-indexed)
-        end_line: Optional end line number (0-indexed). If -1, reads to end.
-    Returns:
-        A string of JSON formatted
+    Reads the content of a file at a known path, with optional line range.
+    Only use this when you already have an exact file path (from keyword_search, go_to_definition,  find_references or content you have). 
+    Do NOT use to discover files or search text — use keyword_search instead.
+    Returns content with line numbers. Max 500 lines per call; specify start_line/end_line for large files.
     """
-
+    # GraphQL查询语句 - 参考main.py中的实现
     gql = """
     query ReadFile($repo: String!, $path: String!, $rev: String!) {
       repository(name: $repo) {
@@ -112,175 +395,118 @@ def read_file(repo_name: str, file_path: str, branch: str = "dev_CipherLAB_F1", 
       }
     }
     """
-    data = graphql_query(gql, {"repo": repo_name, "path": file_path, "rev": branch})
-    
+
+    variables = {
+        "repo": input.repo_name,
+        "path": input.file_path,
+        "rev": input.branch
+    }
+
+    # 调用Sourcegraph GraphQL API
+    data = graphql_query(gql, variables)
+
     if "error" in data:
-        return f"Read Error: {data['error']}"
-    # print (data)
-    content = data.get("data", {}).get("repository", {}).get("commit", {}).get("file", {}).get("content")
-    return
-    if content is None:
-        return "File not found or empty."
+        return ReadFileOutput(content="")
 
-    lines = content.split('\n')
-    
-    # 处理行号截取 (避免读取整个巨大的文件)
-    if end_line == -1: 
-        end_line = len(lines)
-    
-    # 限制读取最大行数，防止 Context 爆炸
-    MAX_LINES = 500
-    if end_line - start_line > MAX_LINES:
-        return f"Error: Requested range too large ({end_line - start_line} lines). Please request smaller chunks."
+    content = ""
 
-    selected_lines = lines[start_line:end_line]
-    numbered_lines = [f"{i + start_line + 1}: {line}" for i, line in enumerate(selected_lines)]
-    
-    return "\n".join(numbered_lines)
-
-
-@mcp.tool()
-def go_to_definition(repo_name: str, file_path: str, line: int, character: int, branch: str = "dev_CipherLAB_F1") -> str:
-    """
-    Go to Definition: Find where a symbol is defined using Sourcegraph SCIP/LSIF graph data.
-    Use this when you see a function/class usage and want to see its implementation.
-    
-    Args:
-        repo_name: The repository name (e.g., 'B0_MP1/alps-release-b0.mp1.rc-aiot')
-        file_path: The file path where the symbol usage is located (e.g., 'alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java')
-        line: The line number (0-indexed)
-        character: The character offset (0-indexed) of the symbol
-        branch: Branch name or commit hash (default: "dev_CipherLAB_F1")
-    Returns:
-        A string of JSON formatted
-    """
-    gql = """
-    query GetDefinition($repo: String!, $rev: String!, $path: String!, $line: Int!, $character: Int!) {
-      repository(name: $repo) {
-        commit(rev: $rev) {
-          blob(path: $path) {
-            lsif {
-              definitions(line: $line, character: $character) {
-                nodes {
-                  resource {
-                    path
-                  }
-                  range {
-                    start { line, character }
-                    end { line, character }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    # 这里的 line 和 character 是查询的符号的位置
-    data = graphql_query(gql, {"repo": repo_name, "path": file_path, "line": line, "character": character, "rev": branch})
-    
-    # print(data)
-    # 解析复杂的 GraphQL 返回
     try:
-        defs = data.get("data", {}).get("repository", {}).get("commit", {}).get("blob", {}).get("lsif", {}).get("definitions", {}).get("nodes")
-        # defs = data['data']['repository']['commit']['blob']['lsif']['definitions']['nodes']
-        if not defs:
-            return "No definition found (SCIP index might be missing)."
-        return defs
-        output = []
-        for d in defs:
-            d_repo = d['resource']['repository']['name']
-            d_path = d['resource']['path']
-            d_line = d['range']['start']['line']
-            output.append(f"Definition found at: {d_repo}/{d_path} (Line {d_line})")
-            
-        return "\n".join(output)
-    except Exception as e:
-        return f"Error parsing graph data: {str(e)}"
+        raw_content = data["data"]["repository"]["commit"]["file"]["content"]
+    except (KeyError, TypeError):
+        raw_content = ""
 
-
-@mcp.tool()
-def get_references(repo_name: str, file_path: str, line: int, character: int, branch: str = "dev_CipherLAB_F1", limit: int = 20) -> str:
-    """
-    Find References: Find all places where a symbol is used/called.
-
-    Args:
-        repo_name: The repository name (e.g., 'B0_MP1/alps-release-b0.mp1.rc-aiot')
-        file_path: The file path where the symbol definition is located (e.g., 'alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java')
-        line: The line number (0-indexed)
-        character: The character offset (0-indexed) of the symbol
-        branch: Branch name or commit hash (default: "dev_CipherLAB_F1")
-        limit: The maximum number of references to return (default: 20)
-    Returns:
-        A string of JSON formatted
-    """
-    gql = """
-    query References($repo: String!, $rev: String!, $path: String!, $line: Int!, $character: Int!, $limit: Int!) {
-      repository(name: $repo) {
-        commit(rev: $rev) {
-          blob(path: $path) {
-            lsif {
-              references(line: $line, character: $character, first: $limit) {
-                nodes {
-                  resource {
-                    path
-                  }
-                  range {
-                    start { line }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    data = graphql_query(gql, {
-        "repo": repo_name, "path": file_path, 
-        "line": line, "character": character, "rev": branch, "limit": limit
-    })
-
-    print(data)
-    # 解析复杂的 GraphQL 返回
-    
     try:
-        refs = data['data']['repository']['commit']['blob']['lsif']['references']['nodes']
-        if not refs:
-            return "No references found."
-            
-        output = [f"Found {len(refs)} references:"]
-        for r in refs:
-            # r_repo = r['resource']['repository']['name']
-            r_path = r['resource']['path']
-            r_line = r['range']['start']['line']
-            output.append(f"- {r_path} (Line {r_line})")
-            
-        return "\n".join(output)
+        lines = raw_content.splitlines()
+
+        # 处理行范围
+        end_line = len(lines) if input.end_line == -1 else min(input.end_line, len(lines))
+        start_line = max(0, input.start_line)
+
+        # 限制最大读取行数
+        MAX_LINES = 500
+        if end_line - start_line > MAX_LINES:
+            #content=f"Error: Requested range too large ({end_line - start_line} lines). Please request smaller chunks."
+            return ReadFileOutput(content="")
+
+        selected_lines = lines[start_line:end_line+1]
+        # 保持0-indexed行号，和其他MCP工具参数对齐，方便AI后续直接使用
+        numbered_lines = [f"{i + start_line}: {line}" for i, line in enumerate(selected_lines)]
+        content = "\n".join(numbered_lines)
+
     except Exception as e:
-        return f"Error parsing graph data: {str(e)}"
+        print(f"Error reading file: {str(e)}")
+        content = ""
+
+    return ReadFileOutput(content=content)
 
 
+# This function use to test all MCP tools
+def testing():
+    # ----------------------------------------
+    # Example Usage
+    # ----------------------------------------
+    import asyncio
+
+    # Example 1: Keyword search
+    search_input = KeywordSearchInput(
+        query="MTK_CAMERA_APP_VERSION_SEVEN",
+        repo_name="B0_MP1/alps-release-b0.mp1.rc-aiot",
+        branch="dev_CipherLAB_F1"
+    )
+    print("Keyword Search Input:")
+    print(search_input.model_dump_json(indent=2))
+    result = asyncio.run(keyword_search(search_input))
+    print(result.model_dump_json(indent=2))
+    print()
+
+    # Example 2: Read file
+    read_input = ReadFileInput(
+        repo_name="B0_MP1/alps-release-b0.mp1.rc-aiot",
+        file_path="alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java",
+        start_line=11,
+        end_line=12
+    )
+    print("Read File Input:")
+    print(read_input.model_dump_json(indent=2))
+    result = asyncio.run(read_file(read_input))
+    # print(result.content) this is human readable
+    print(result.model_dump_json(indent=2))
+    print()
+
+    # Example 3: Go to definition
+    def_input = GoToDefinitionInput(
+        repo_name="B0_MP1/alps-release-b0.mp1.rc-aiot",
+        file_path="alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java",
+        line=100,
+        character=8
+    )
+    print("Go To Definition Input:")
+    print(def_input.model_dump_json(indent=2))
+    result = asyncio.run(go_to_definition(def_input))
+    print(result.model_dump_json(indent=2))
+    print()
+
+    # Example 4: Find references
+    ref_input = FindReferencesInput(
+        repo_name="B0_MP1/alps-release-b0.mp1.rc-aiot",
+        file_path="alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java",
+        line=79,
+        character=21
+    )
+    print("Find References Input:")
+    print(ref_input.model_dump_json(indent=2))
+    result = asyncio.run(find_references(ref_input))
+    print(result.model_dump_json(indent=2))
+
+
+# Main process
 if __name__ == "__main__":
-    print("Starting MCP server...")
-    # mcp.run()
     # MCP Inspector调试页面URL写入http://127.0.0.1:8000/mcp即可
-    # mcp.run(transport="http", host="0.0.0.0", port=8010)
-    time_start = time.time()
+    IS_MCP_MODE = True
+    # IS_MCP_MODE = False
+    if IS_MCP_MODE:
+        mcp.run(transport="http", host="0.0.0.0", port=8010)
+    else:
+        testing()
 
-    # DEMO keyword_search
-    # 查找MTK A16-SYSTEM的分支dev_CipherLAB_F1下的关键词MTK_CAMERA_APP_VERSION_SEVEN
-    # print(keyword_search("MTK_CAMERA_APP_VERSION_SEVEN", "B0_MP1/alps-release-b0.mp1.rc-aiot", "dev_CipherLAB_F1"))
-
-    # DEMO read_file
-    # 读取展锐A16-SYSTEM的分支dev_CipherLAB_F1下的文件ShadowMaskSettings.kt
-    print(read_file("B0_MP1/alps-release-b0.mp1.rc-aiot", "alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java", "dev_CipherLAB_F1", 0, 100))
-
-    # DEMO go_to_definition
-    # 查找私人库GetKnownMAUI的分支master下的关键词的定义位置
-    # print(go_to_definition("B0_MP1/alps-release-b0.mp1.rc-aiot", "alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java", 100, 8, "dev_CipherLAB_F1"))
-
-    # print(get_references("B0_MP1/alps-release-b0.mp1.rc-aiot", "alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java", 79, 21111, "dev_CipherLAB_F1", 20))
-
-    print(f"[CCMETA] Search cost {time.time() - time_start:.2f} seconds.")
+# END OF FILE

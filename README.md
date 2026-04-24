@@ -2,5 +2,5 @@
 
 ```bash
 uv sync
-uv run server.py
+uv run main.py
 ```
