@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import time
 from typing import Annotated, List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 import requests
@@ -42,12 +43,11 @@ class CodeChunk(BaseModel):
     """
     Represents a snippet of code from a file.
     """
-    startLine: int = Field(description="0-based line number where the chunk starts")
-    startCharacter: int = Field(description="0-based character offset where the chunk starts")
-    endLine: int = Field(description="0-based line number where the chunk ends")
-    endCharacter: int = Field(description="0-based character offset where the chunk ends")
+    startLine: int = Field(description="0-indexed line number where the chunk starts")
+    startCharacter: int = Field(description="0-indexed character offset where the chunk starts")
+    endLine: int = Field(description="0-indexed line number where the chunk ends(inclusive this line)")
+    endCharacter: int = Field(description="0-indexed character offset where the chunk ends")
     content: str = Field(description="Code content with line number prefixes")
-
 
 class FileBlock(BaseModel):
     """
@@ -141,14 +141,14 @@ async def find_references(input: FindReferencesInput) -> FindReferencesOutput:
 
         for ref in refs:
             file_path = ref["resource"]["path"]
-            start_line = ref["range"]["start"]["line"]
-            end_line = ref["range"]["end"]["line"]
+            startLine = ref["range"]["start"]["line"]
+            endLine = ref["range"]["end"]["line"]
 
             chunk = CodeChunk(
-                startLine=start_line,
+                startLine=startLine,
                 startCharacter=ref["range"]["start"]["character"],
                 endCharacter=ref["range"]["end"]["character"],
-                endLine=end_line,
+                endLine=endLine,
                 content=""
             )
 
@@ -250,12 +250,12 @@ async def go_to_definition(input: GoToDefinitionInput) -> GoToDefinitionOutput:
     try:
         for d in defs:
             file_path = d["resource"]["path"]
-            start_line = d["range"]["start"]["line"]  
-            end_line = d["range"]["end"]["line"]
+            startLine = d["range"]["start"]["line"]  
+            endLine = d["range"]["end"]["line"]
 
             chunk = CodeChunk(
-                startLine=start_line,
-                endLine=end_line,
+                startLine=startLine,
+                endLine=endLine,
                 startCharacter=d["range"]["start"]["character"],
                 endCharacter=d["range"]["end"]["character"],
                 content="" 
@@ -375,8 +375,8 @@ class ReadFileInput(BaseModel):
     repo_name: str = Field(description="Repository name (e.g., B0_MP1/alps-release-b0.mp1.rc-aiot)")
     file_path: str = Field(description="Full path to the file within the repository")
     branch: str = Field("dev_CipherLAB_F1", description="Branch name or commit hash")
-    start_line: int = Field(0, description="0-indexed start line number")
-    end_line: int = Field(-1, description="0-indexed end line number(inclusive this line), -1 means read to end")
+    startLine: int = Field(0, description="0-indexed start line number")
+    endLine: int = Field(-1, description="0-indexed end line number(inclusive this line), -1 means read to end")
 
 
 class ReadFileOutput(BaseModel):
@@ -388,7 +388,7 @@ async def read_file(input: ReadFileInput) -> ReadFileOutput:
     Reads the content of a file at a known path, with optional line range.
     Only use this when you already have an exact file path (from keyword_search, go_to_definition,  find_references or content you have). 
     Do NOT use to discover files or search text — use keyword_search instead.
-    Returns content with line numbers. Max 500 lines per call; specify start_line/end_line for large files.
+    Returns content with line numbers. Max 500 lines per call; specify startLine/endLine for large files.
     """
     # GraphQL查询语句 - 参考main.py中的实现
     gql = """
@@ -426,18 +426,18 @@ async def read_file(input: ReadFileInput) -> ReadFileOutput:
         lines = raw_content.splitlines()
 
         # 处理行范围
-        end_line = len(lines) if input.end_line == -1 else min(input.end_line, len(lines))
-        start_line = max(0, input.start_line)
+        endLine = len(lines) if input.endLine == -1 else min(input.endLine, len(lines))
+        startLine = max(0, input.startLine)
 
         # 限制最大读取行数
         MAX_LINES = 500
-        if end_line - start_line > MAX_LINES:
-            #content=f"Error: Requested range too large ({end_line - start_line} lines). Please request smaller chunks."
+        if endLine - startLine > MAX_LINES:
+            #content=f"Error: Requested range too large ({endLine - startLine} lines). Please request smaller chunks."
             return ReadFileOutput(content="")
 
-        selected_lines = lines[start_line:end_line+1]
+        selected_lines = lines[startLine:endLine+1]
         # 保持0-indexed行号，和其他MCP工具参数对齐，方便AI后续直接使用
-        numbered_lines = [f"{i + start_line}: {line}" for i, line in enumerate(selected_lines)]
+        numbered_lines = [f"{i + startLine}: {line}" for i, line in enumerate(selected_lines)]
         content = "\n".join(numbered_lines)
 
     except Exception as e:
@@ -453,6 +453,7 @@ def testing():
     # Example Usage
     # ----------------------------------------
     import asyncio
+    time_start = time.time()
 
     # Example 1: Keyword search
     search_input = KeywordSearchInput(
@@ -461,23 +462,28 @@ def testing():
         branch="dev_CipherLAB_F1"
     )
     print("Keyword Search Input:")
-    print(search_input.model_dump_json(indent=2))
+    # print(search_input.model_dump_json(indent=2))
     result = asyncio.run(keyword_search(search_input))
-    print(result.model_dump_json(indent=2))
+    # print(result.model_dump_json(indent=2))
+    print(f"[CCMETA] Search cost {time.time() - time_start:.2f} seconds.")
+    time_start = time.time()
     print()
+
 
     # Example 2: Read file
     read_input = ReadFileInput(
         repo_name="B0_MP1/alps-release-b0.mp1.rc-aiot",
         file_path="alps/vendor/mediatek/proprietary/packages/apps/Camera2/common/src/com/mediatek/camera/common/CameraContext.java",
-        start_line=11,
-        end_line=12
+        startLine=11,
+        endLine=12
     )
     print("Read File Input:")
-    print(read_input.model_dump_json(indent=2))
+    # print(read_input.model_dump_json(indent=2))
     result = asyncio.run(read_file(read_input))
     # print(result.content) this is human readable
-    print(result.model_dump_json(indent=2))
+    # print(result.model_dump_json(indent=2))
+    print(f"[CCMETA] Search cost {time.time() - time_start:.2f} seconds.")
+    time_start = time.time()
     print()
 
     # Example 3: Go to definition
@@ -488,9 +494,11 @@ def testing():
         character=8
     )
     print("Go To Definition Input:")
-    print(def_input.model_dump_json(indent=2))
+    # print(def_input.model_dump_json(indent=2))
     result = asyncio.run(go_to_definition(def_input))
-    print(result.model_dump_json(indent=2))
+    # print(result.model_dump_json(indent=2))
+    print(f"[CCMETA] Search cost {time.time() - time_start:.2f} seconds.")
+    time_start = time.time()
     print()
 
     # Example 4: Find references
@@ -501,9 +509,12 @@ def testing():
         character=21
     )
     print("Find References Input:")
-    print(ref_input.model_dump_json(indent=2))
+    # print(ref_input.model_dump_json(indent=2))
     result = asyncio.run(find_references(ref_input))
-    print(result.model_dump_json(indent=2))
+    # print(result.model_dump_json(indent=2))
+    print(f"[CCMETA] Search cost {time.time() - time_start:.2f} seconds.")
+    time_start = time.time()
+    print()
 
 
 # Main process
