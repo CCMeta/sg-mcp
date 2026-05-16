@@ -1,7 +1,7 @@
 [project]
-name = "sg-mcp"
+name = "sr-sg-mcp"
 version = "0.1.0"
-description = "sg-mcp description"
+description = "sr-sg-mcp description"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

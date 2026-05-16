@@ -1,4 +1,4 @@
-# sg-mcp
+# sr-sg-mcp
 
 ```bash
 uv sync
